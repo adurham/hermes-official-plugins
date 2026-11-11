@@ -149,6 +149,9 @@ def native_case(tmp_path, monkeypatch):
                     {'type': 'message_delta', 'delta': {'stop_reason': config.get('stop_reason',
                         'tool_use' if config.get('tool') else 'end_turn')}, 'usage': usage},
                 ]
+                if config.get('malformed'):  # streamed tool input is unvalidated: the model wrote arguments that are not JSON
+                    events.insert(2, {'type': 'content_block_delta', 'index': 0,
+                        'delta': {'type': 'input_json_delta', 'partial_json': '{"keywords": i18n, cp932}'}})
                 if not config.get('incomplete'):
                     events.append({'type': 'message_stop'})
                 self.wfile.write(''.join('data: ' + json.dumps(e) + '\n\n' for e in events).encode())
@@ -211,6 +214,32 @@ def test_max_turns_tools_return_without_reading_exit_code(native_case):
         (state.root / 'release').touch()
         wait_for(lambda: state.process not in directsdk._draining)
         assert state.real.wait(timeout=1) == 1
+
+
+def test_a_malformed_tool_call_is_a_dropped_call_not_a_native_failure(native_case):
+    """The capture drops a call whose arguments are not JSON, and native ends that turn on error_max_turns as at
+    any call boundary. Raising there failed every retry of the same history; Hermes must get finish `tool_calls`
+    without a call, which its dropped-tool-call recovery answers by re-prompting the model."""
+    with native_case(tool=True, malformed=True, subtype='error_max_turns', is_error=True, exitcode=1) as state:
+        (state.root / 'release').touch()  # no tool_use survives the capture, so native's exit is read
+        result = state.client.create(**REQUEST)
+        choice = result.choices[0]
+        assert choice.finish_reason == 'tool_calls'
+        assert not choice.message.tool_calls and choice.message.content is None
+        assert result.usage.prompt_tokens == 15
+
+
+def test_an_empty_dropped_turn_is_not_replayed_as_an_empty_assistant_message(native_case):
+    with native_case(tool=True, malformed=True, subtype='error_max_turns', is_error=True, exitcode=1) as state:
+        (state.root / 'release').touch()
+        message = state.client.create(**REQUEST).choices[0].message
+    assert message.reasoning_details[0]['messages'][0]['content'] == []
+    history = [{'role': 'user', 'content': 'fixture'}, {'role': 'assistant', 'content': None, 'tool_calls': None,
+                                                         'reasoning_details': message.reasoning_details},
+               {'role': 'user', 'content': 'Your previous turn indicated a tool call but none was included.'}]
+    _, frames = directsdk.prepare_history(history)
+    assert [f['type'] for f in frames] == ['user']
+    assert [b['type'] for b in frames[0]['message']['content']] == ['text', 'text']
 
 
 @pytest.mark.skipif(not hasattr(os, 'killpg'), reason='POSIX foreign-child reaper (waitpid(-1, WNOHANG), process groups)')

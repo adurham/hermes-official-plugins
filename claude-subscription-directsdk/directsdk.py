@@ -174,6 +174,10 @@ def prepare_history(messages, names=None):
                         # so after Hermes compresses the history it still reports the old size and native
                         # refuses locally without sending (#92). `usage` is local metadata, never on the wire.
                         native.pop('usage', None)
+                        if not native.get('content'):
+                            # A turn whose only call was dropped as malformed has nothing left to replay, and the API
+                            # rejects an empty assistant message.
+                            continue
                         frames.append({'type': 'assistant', 'message': native})
                     continue
                 # Host compaction/hooks own visible history. Never restore stale
@@ -1031,7 +1035,11 @@ class Client:
                         name = block['name'].removeprefix(PREFIX)
                         name = hermes_names.get(name, name)
                         calls.append({'id': block['id'], 'type': 'function', 'function': {'name': name, 'arguments': json.dumps(block['input'], separators=(',', ':'), allow_nan=False)}})
-                boundary = bool(calls) and final.get('subtype') == 'error_max_turns' and (fast or proc_returncode == 1)
+                # Streamed tool input is unvalidated, so the model can write a call that is not JSON (`"keywords": a, b`).
+                # The capture drops it, yet native saw a tool_use and ends the turn on error_max_turns like any call
+                # boundary: that is the model's malformed call, not a native failure that every retry would repeat.
+                dropped = admission.used and bool(admission.capture.unparsed)
+                boundary = (bool(calls) or dropped) and final.get('subtype') == 'error_max_turns' and (fast or proc_returncode == 1)
                 if not boundary and not native_failure_handled and ((not fast and proc_returncode != 0) or final.get('is_error') or final.get('subtype') != 'success'):
                     raise RuntimeError('Native request failed: ' + str(final.get('subtype')) + _stderr_tail(native_stderr))
                 usage = assistants[0]['usage'] if admission.used else final.get('usage')
@@ -1071,7 +1079,9 @@ class Client:
                 normalized_usage['native_admission'] = {'upstream_requests': int(admission.used), 'blocked_requests': admission.denied, 'request_id': admission.request_id}
                 if admission.unrestored:
                     normalized_usage['native_admission']['unrestored'] = admission.unrestored
-                finish = 'content_filter' if refused else 'tool_calls' if calls else ('length' if any(a.get('stop_reason') in ('max_tokens', 'model_context_window_exceeded') for a in assistants) else 'stop')
+                # A dropped call with nothing else is finish `tool_calls` without a call: Hermes' dropped-tool-call
+                # recovery re-prompts the model to issue it (3 tries), where `stop` would end the turn unstarted.
+                finish = 'content_filter' if refused else 'tool_calls' if calls else ('length' if any(a.get('stop_reason') in ('max_tokens', 'model_context_window_exceeded') for a in assistants) else 'tool_calls' if dropped else 'stop')
                 response = obj({'id': assistants[-1].get('id', 'claude-native'), 'model': kwargs['model'], 'object': 'chat.completion', 'choices': [{'index': 0, 'finish_reason': finish, 'message': message}], 'usage': normalized_usage})
                 chunk = self._chunk(kwargs['model'], {'content': None, 'tool_calls': [dict(tc, index=i) for i, tc in enumerate(calls)] or None, 'reasoning_details': [carrier], **({'refusal': message['refusal']} if refused else {})}, finish, normalized_usage)
                 chunk._response = response
