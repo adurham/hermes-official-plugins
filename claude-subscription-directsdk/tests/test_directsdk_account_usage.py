@@ -77,6 +77,29 @@ def test_limits_come_from_claude_code_get_usage(cli):
     assert call.env['ANTHROPIC_BASE_URL'].startswith('http://127.0.0.1:')
 
 
+def test_a_model_limit_is_not_the_account_allowance(cli):
+    """Core's status bar shows the fullest ACCOUNT window. Fable's own week, left account-scoped, was that
+    pick on every chat of the login (Sonnet ones included) whenever it led the session's. Numbers trimmed
+    from a real answer."""
+    cli.reply = _answer({'limits': [
+        {'kind': 'session', 'percent': 19, 'resets_at': '2026-11-16T07:50:00Z', 'scope': None},
+        {'kind': 'weekly_all', 'percent': 16, 'resets_at': '2026-11-19T20:00:00Z', 'scope': None},
+        {'kind': 'weekly_scoped', 'percent': 20, 'resets_at': '2026-11-19T20:00:00Z',
+         'scope': {'model': {'id': None, 'display_name': 'Fable'}, 'surface': None}}]})
+    snapshot, _ = _usage()
+    assert [(w.label, w.scope) for w in snapshot.windows] == [
+        ('Current session', 'account'), ('Current week', 'account'), ('Fable week', 'model')]
+    # The same cap named only by `model_scoped` (no `limits` row), and the legacy per-model weeks.
+    cli.reply = _answer(REAL_2_1_319)
+    snapshot, _ = _usage()
+    assert [(w.label, w.scope) for w in snapshot.windows] == [
+        ('Current session', 'account'), ('Current week', 'account'), ('Fable week', 'model')]
+    cli.reply = _answer({**LEGACY, 'seven_day_opus': {'utilization': 0.5}})
+    snapshot, _ = _usage()
+    assert [(w.label, w.scope) for w in snapshot.windows] == [
+        ('Current session', 'account'), ('Current week', 'account'), ('Opus week', 'model')]
+
+
 def test_a_body_without_limits_reads_the_legacy_windows(cli):
     cli.reply = _answer(LEGACY)
     snapshot, _ = _usage()

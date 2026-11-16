@@ -31,6 +31,9 @@ LIMIT_LABELS = {'session': 'Current session', 'weekly_all': 'Current week'}
 # The older top-level windows, for a response without `limits` (core's Anthropic fetcher reads these).
 LEGACY_WINDOWS = (('five_hour', 'Current session'), ('seven_day', 'Current week'),
                   ('seven_day_opus', 'Opus week'), ('seven_day_sonnet', 'Sonnet week'))
+# Windows that cap one model family only. Core shows the fullest ACCOUNT window as the session's plan
+# gauge, so a model cap left at the default scope put "Fable week" on every chat, whatever its model.
+LEGACY_MODEL_WINDOWS = frozenset({'seven_day_opus', 'seven_day_sonnet'})
 
 
 def _reset_at(value):
@@ -85,7 +88,7 @@ def _usage_details(payload, windows):
         name = row.get('display_name') if isinstance(row, dict) else None
         if isinstance(name, str) and name and f'{name} week' not in shown:
             windows.append(AccountUsageWindow(label=f'{name} week', used_percent=_percent(row.get('utilization')),
-                                              reset_at=_reset_at(row.get('resets_at'))))
+                                              reset_at=_reset_at(row.get('resets_at')), scope='model'))
     return details
 
 
@@ -102,14 +105,17 @@ def usage_windows(payload):
         name = model.get('display_name')
         label = (LIMIT_LABELS.get(kind) if isinstance(kind, str) else None) or (
             f'{name} week' if isinstance(name, str) and name else str(kind or 'unknown'))
+        # A limit the API restricts (to a model, or a surface) is not the account's allowance.
         windows.append(AccountUsageWindow(label=label, used_percent=_percent(entry.get('percent')),
-                                          reset_at=_reset_at(entry.get('resets_at'))))
+                                          reset_at=_reset_at(entry.get('resets_at')),
+                                          scope='model' if any(scope.values()) else 'account'))
     if not limits:
         for key, label in LEGACY_WINDOWS:
             window = payload.get(key)
             used = _percent(window.get('utilization'), fraction=True) if isinstance(window, dict) else None
             if used is not None:
-                windows.append(AccountUsageWindow(label=label, used_percent=used, reset_at=_reset_at(window.get('resets_at'))))
+                windows.append(AccountUsageWindow(label=label, used_percent=used, reset_at=_reset_at(window.get('resets_at')),
+                                                  scope='model' if key in LEGACY_MODEL_WINDOWS else 'account'))
     return windows, _usage_details(payload, windows)
 
 
